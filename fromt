@@ -1,0 +1,533 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Lineup Tournament</title>
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link href="https://fonts.googleapis.com/css2?family=Oswald:wght@500;600;700&family=Inter:wght@400;500;600&family=IBM+Plex+Mono:wght@500;600&display=swap" rel="stylesheet" />
+<style>
+  :root {
+    --bg: #0a0d11;
+    --bg-raised: #12161c;
+    --line: #202832;
+    --amber: #e8b23d;
+    --green: #35d07f;
+    --red: #eb5757;
+    --text: #e9edf1;
+    --muted: #8a93a1;
+    --mono: 'IBM Plex Mono', monospace;
+    --display: 'Oswald', sans-serif;
+    --body: 'Inter', sans-serif;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--text);
+    font-family: var(--body);
+    min-height: 100vh;
+    background-image:
+      linear-gradient(180deg, rgba(232,178,61,0.04), transparent 220px),
+      repeating-linear-gradient(0deg, rgba(255,255,255,0.015) 0px, rgba(255,255,255,0.015) 1px, transparent 1px, transparent 3px);
+  }
+  .wrap { max-width: 720px; margin: 0 auto; padding: 40px 20px 80px; }
+
+  header.top { margin-bottom: 36px; }
+  .eyebrow {
+    font-family: var(--mono);
+    font-size: 11px;
+    letter-spacing: 0.18em;
+    color: var(--amber);
+    text-transform: uppercase;
+    margin-bottom: 8px;
+  }
+  h1 {
+    font-family: var(--display);
+    font-weight: 700;
+    font-size: 34px;
+    letter-spacing: 0.01em;
+    margin: 0;
+    text-transform: uppercase;
+  }
+  .sub { color: var(--muted); font-size: 14px; margin-top: 6px; }
+
+  .card {
+    background: var(--bg-raised);
+    border: 1px solid var(--line);
+    border-radius: 10px;
+    padding: 28px;
+  }
+  .card + .card { margin-top: 16px; }
+
+  .screen { display: none; }
+  .screen.active { display: block; }
+
+  label {
+    display: block;
+    font-family: var(--mono);
+    font-size: 11px;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: var(--muted);
+    margin-bottom: 8px;
+  }
+
+  /* Step 1: stepper */
+  .stepper {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 24px;
+    margin: 12px 0 28px;
+  }
+  .stepper button {
+    width: 44px; height: 44px;
+    border-radius: 8px;
+    border: 1px solid var(--line);
+    background: #171d25;
+    color: var(--text);
+    font-size: 20px;
+    cursor: pointer;
+  }
+  .stepper button:hover { border-color: var(--amber); color: var(--amber); }
+  .stepper .count {
+    font-family: var(--display);
+    font-size: 56px;
+    font-weight: 700;
+    min-width: 90px;
+    text-align: center;
+    color: var(--amber);
+  }
+
+  .btn {
+    display: block;
+    width: 100%;
+    padding: 14px 20px;
+    border-radius: 8px;
+    border: none;
+    background: var(--amber);
+    color: #14100a;
+    font-family: var(--display);
+    font-weight: 600;
+    font-size: 15px;
+    letter-spacing: 0.03em;
+    text-transform: uppercase;
+    cursor: pointer;
+  }
+  .btn:hover { filter: brightness(1.08); }
+  .btn:disabled { opacity: 0.5; cursor: not-allowed; }
+  .btn.ghost {
+    background: transparent;
+    border: 1px solid var(--line);
+    color: var(--muted);
+  }
+  .btn.ghost:hover { border-color: var(--muted); color: var(--text); }
+
+  .row-2 {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 14px;
+  }
+
+  input[type="text"], input[type="password"], input[type="date"], select {
+    width: 100%;
+    padding: 11px 12px;
+    border-radius: 7px;
+    border: 1px solid var(--line);
+    background: #0e1319;
+    color: var(--text);
+    font-family: var(--body);
+    font-size: 14px;
+  }
+  input:focus, select:focus {
+    outline: none;
+    border-color: var(--amber);
+  }
+
+  .field { margin-bottom: 16px; }
+  .hint { font-size: 12px; color: var(--muted); margin-top: 6px; line-height: 1.4; }
+
+  #usernameFields { display: grid; gap: 10px; margin-bottom: 18px; }
+  .uname-row { display: flex; align-items: center; gap: 10px; }
+  .uname-row .slot {
+    font-family: var(--mono);
+    color: var(--muted);
+    width: 26px;
+    text-align: right;
+    font-size: 13px;
+  }
+
+  .btn-row { display: flex; gap: 10px; margin-top: 22px; }
+  .btn-row .btn { flex: 1; }
+
+  /* Loading */
+  .loading { text-align: center; padding: 40px 0; }
+  .spinner {
+    width: 34px; height: 34px;
+    border: 3px solid var(--line);
+    border-top-color: var(--amber);
+    border-radius: 50%;
+    margin: 0 auto 16px;
+    animation: spin 0.8s linear infinite;
+  }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  .loading .msg { font-family: var(--mono); font-size: 13px; color: var(--muted); }
+
+  /* Results / scoreboard */
+  .board-meta {
+    display: flex;
+    justify-content: space-between;
+    align-items: baseline;
+    margin-bottom: 18px;
+    font-family: var(--mono);
+    font-size: 12px;
+    color: var(--muted);
+  }
+  .board-meta span.hl { color: var(--amber); }
+
+  .standing {
+    display: grid;
+    grid-template-columns: 44px 1fr auto;
+    align-items: center;
+    gap: 14px;
+    padding: 14px 12px;
+    border-bottom: 1px solid var(--line);
+    cursor: pointer;
+    opacity: 0;
+    transform: translateY(6px);
+    animation: reveal 0.35s ease forwards;
+  }
+  .standing:last-child { border-bottom: none; }
+  .standing:hover { background: rgba(255,255,255,0.02); }
+  @keyframes reveal { to { opacity: 1; transform: translateY(0); } }
+
+  .rank {
+    font-family: var(--mono);
+    font-weight: 600;
+    font-size: 17px;
+    text-align: center;
+    color: var(--muted);
+  }
+  .standing[data-rank="1"] .rank { color: #f4c94a; }
+  .standing[data-rank="2"] .rank { color: #c9d2dc; }
+  .standing[data-rank="3"] .rank { color: #d38a54; }
+
+  .who .uname { font-weight: 600; font-size: 15px; }
+  .who .status { font-family: var(--mono); font-size: 11px; color: var(--muted); margin-top: 2px; }
+
+  .scorebox { text-align: right; }
+  .scorebox .score {
+    font-family: var(--mono);
+    font-weight: 600;
+    font-size: 19px;
+    color: var(--green);
+  }
+  .scorebox .rankd { font-family: var(--mono); font-size: 11px; color: var(--muted); margin-top: 2px; }
+
+  .lineup-detail {
+    display: none;
+    grid-column: 1 / -1;
+    margin-top: 10px;
+    padding-top: 10px;
+    border-top: 1px dashed var(--line);
+  }
+  .lineup-detail.open { display: block; }
+  .lineup-detail table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  .lineup-detail th, .lineup-detail td {
+    text-align: left;
+    padding: 6px 8px;
+    color: var(--muted);
+  }
+  .lineup-detail th {
+    font-family: var(--mono);
+    font-size: 10px;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+  }
+  .lineup-detail td:last-child, .lineup-detail th:last-child { text-align: right; }
+  .lineup-detail tr td { color: var(--text); border-top: 1px solid var(--line); }
+
+  .errors {
+    margin-top: 18px;
+    padding: 14px 16px;
+    border: 1px solid rgba(235,87,87,0.35);
+    background: rgba(235,87,87,0.06);
+    border-radius: 8px;
+  }
+  .errors h3 {
+    font-family: var(--mono);
+    font-size: 12px;
+    color: var(--red);
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    margin: 0 0 8px;
+  }
+  .errors li { font-size: 13px; color: var(--muted); margin-bottom: 4px; }
+
+  .banner {
+    padding: 12px 14px;
+    border-radius: 7px;
+    border: 1px solid rgba(235,87,87,0.35);
+    background: rgba(235,87,87,0.08);
+    color: #ffb4b4;
+    font-size: 13px;
+    margin-bottom: 16px;
+  }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <header class="top">
+    <div class="eyebrow">Real Sports · Lineup Tournament</div>
+    <h1>Set the field</h1>
+    <div class="sub">Pick how many entries are in, drop in usernames, and pull live scores for one contest.</div>
+  </header>
+
+  <!-- STEP 1: field size -->
+  <div id="screen-1" class="screen active">
+    <div class="card">
+      <label>Number of entries</label>
+      <div class="stepper">
+        <button type="button" id="decBtn">&minus;</button>
+        <div class="count" id="countDisplay">4</div>
+        <button type="button" id="incBtn">&plus;</button>
+      </div>
+      <button class="btn" id="toStep2">Build Tournament</button>
+    </div>
+  </div>
+
+  <!-- STEP 2: details -->
+  <div id="screen-2" class="screen">
+    <div class="card">
+      <div class="row-2">
+        <div class="field">
+          <label>Sport</label>
+          <select id="sportSelect">
+            <option value="nba">NBA</option>
+            <option value="wnba">WNBA</option>
+            <option value="mlb">MLB</option>
+            <option value="nhl">NHL</option>
+            <option value="nfl">NFL</option>
+            <option value="ncaam">NCAAM</option>
+            <option value="soccer" selected>Soccer</option>
+          </select>
+        </div>
+        <div class="field">
+          <label>Contest date</label>
+          <input type="date" id="dayInput" />
+        </div>
+      </div>
+
+      <label>Entries</label>
+      <div id="usernameFields"></div>
+
+      <div class="field">
+        <label>real-auth-info</label>
+        <input type="password" id="authInput" placeholder="Paste your real-auth-info" autocomplete="off" />
+        <div class="hint">Sent directly to the serverless function for this request only — never stored or logged.</div>
+      </div>
+
+      <div class="btn-row">
+        <button class="btn ghost" id="backTo1">Back</button>
+        <button class="btn" id="runTournament">Run Tournament</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- STEP 3: loading -->
+  <div id="screen-loading" class="screen">
+    <div class="card loading">
+      <div class="spinner"></div>
+      <div class="msg" id="loadingMsg">Finding contest…</div>
+    </div>
+  </div>
+
+  <!-- STEP 4: results -->
+  <div id="screen-results" class="screen">
+    <div id="errorBanner"></div>
+    <div class="board-meta">
+      <span>Contest <span class="hl" id="metaContestId">—</span></span>
+      <span><span class="hl" id="metaSport">—</span> · <span id="metaDay">—</span></span>
+    </div>
+    <div class="card" style="padding: 8px 12px;">
+      <div id="standingsList"></div>
+    </div>
+    <div id="errorsBlock"></div>
+    <button class="btn ghost" id="backToStart" style="margin-top:18px;">Start a new tournament</button>
+  </div>
+
+</div>
+
+<script>
+  const state = { count: 4, lineups: {} };
+
+  const countDisplay = document.getElementById('countDisplay');
+  const decBtn = document.getElementById('decBtn');
+  const incBtn = document.getElementById('incBtn');
+
+  decBtn.addEventListener('click', () => {
+    state.count = Math.max(2, state.count - 1);
+    countDisplay.textContent = state.count;
+  });
+  incBtn.addEventListener('click', () => {
+    state.count = Math.min(50, state.count + 1);
+    countDisplay.textContent = state.count;
+  });
+
+  function showScreen(id) {
+    document.querySelectorAll('.screen').forEach((el) => el.classList.remove('active'));
+    document.getElementById(id).classList.add('active');
+  }
+
+  document.getElementById('toStep2').addEventListener('click', () => {
+    buildUsernameFields(state.count);
+    // default date = today
+    const dayInput = document.getElementById('dayInput');
+    if (!dayInput.value) dayInput.value = new Date().toISOString().slice(0, 10);
+    showScreen('screen-2');
+  });
+
+  document.getElementById('backTo1').addEventListener('click', () => showScreen('screen-1'));
+  document.getElementById('backToStart').addEventListener('click', () => showScreen('screen-1'));
+
+  function buildUsernameFields(n) {
+    const container = document.getElementById('usernameFields');
+    container.innerHTML = '';
+    for (let i = 1; i <= n; i++) {
+      const row = document.createElement('div');
+      row.className = 'uname-row';
+      row.innerHTML = `
+        <span class="slot">${i}</span>
+        <input type="text" placeholder="username" data-idx="${i}" />
+      `;
+      container.appendChild(row);
+    }
+  }
+
+  document.getElementById('runTournament').addEventListener('click', runTournament);
+
+  async function runTournament() {
+    const sport = document.getElementById('sportSelect').value;
+    const day = document.getElementById('dayInput').value;
+    const authInfo = document.getElementById('authInput').value.trim();
+    const usernames = Array.from(document.querySelectorAll('#usernameFields input'))
+      .map((el) => el.value.trim())
+      .filter(Boolean);
+
+    if (!authInfo) return alert('real-auth-info is required.');
+    if (!day) return alert('Pick a contest date.');
+    if (usernames.length === 0) return alert('Enter at least one username.');
+
+    showScreen('screen-loading');
+    document.getElementById('loadingMsg').textContent = 'Finding contest and pulling lineups…';
+
+    try {
+      const res = await fetch('/api/tournament', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ authInfo, sport, day, usernames }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || 'Request failed');
+      renderResults(data);
+      showScreen('screen-results');
+    } catch (e) {
+      showScreen('screen-2');
+      alert(e.message);
+    }
+  }
+
+  function renderResults(data) {
+    document.getElementById('metaContestId').textContent = data.contestId;
+    document.getElementById('metaSport').textContent = data.sport.toUpperCase();
+    document.getElementById('metaDay').textContent = data.day;
+
+    state.lineups = {};
+    (data.lineups || []).forEach((row) => {
+      const key = row.inputUsername;
+      if (!state.lineups[key]) state.lineups[key] = [];
+      state.lineups[key].push(row);
+    });
+
+    const list = document.getElementById('standingsList');
+    list.innerHTML = '';
+    (data.summary || []).forEach((s, i) => {
+      const rank = i + 1;
+      const el = document.createElement('div');
+      el.className = 'standing';
+      el.dataset.rank = rank;
+      el.style.animationDelay = `${i * 0.05}s`;
+      el.innerHTML = `
+        <div class="rank">${rank}</div>
+        <div class="who">
+          <div class="uname">${escapeHtml(s.userName || s.inputUsername)}</div>
+          <div class="status">${s.isFinalized ? 'FINAL' : 'LIVE'} · ${escapeHtml(s.inputUsername)}</div>
+        </div>
+        <div class="scorebox">
+          <div class="score">${s.calculatedScore != null ? s.calculatedScore.toFixed(2) : '—'}</div>
+          <div class="rankd">${escapeHtml(s.rankDisplay || s.scoreDisplay || '')}</div>
+        </div>
+        <div class="lineup-detail" id="detail-${cssSafe(s.inputUsername)}"></div>
+      `;
+      el.addEventListener('click', () => toggleDetail(s.inputUsername));
+      list.appendChild(el);
+    });
+
+    const errorsBlock = document.getElementById('errorsBlock');
+    errorsBlock.innerHTML = '';
+    if (data.errors && data.errors.length) {
+      const box = document.createElement('div');
+      box.className = 'errors';
+      box.innerHTML = `<h3>Could not load</h3><ul>${data.errors
+        .map((e) => `<li><strong>${escapeHtml(e.inputUsername)}</strong> — ${escapeHtml(e.error)}</li>`)
+        .join('')}</ul>`;
+      errorsBlock.appendChild(box);
+    }
+  }
+
+  function toggleDetail(username) {
+    const el = document.getElementById(`detail-${cssSafe(username)}`);
+    if (!el) return;
+    const isOpen = el.classList.contains('open');
+    document.querySelectorAll('.lineup-detail.open').forEach((d) => d.classList.remove('open'));
+    if (isOpen) return;
+
+    const players = state.lineups[username] || [];
+    if (players.length === 0) {
+      el.innerHTML = '<div class="hint">No lineup detail available.</div>';
+    } else {
+      el.innerHTML = `
+        <table>
+          <thead><tr><th>#</th><th>Player</th><th>Value</th><th>Mult</th><th>Score</th></tr></thead>
+          <tbody>
+            ${players
+              .map(
+                (p) => `<tr>
+                  <td>${p.order ?? ''}</td>
+                  <td>${escapeHtml(p.player || '')}</td>
+                  <td>${p.value ?? '—'}</td>
+                  <td>${escapeHtml(p.multiplierDisplay || '')}</td>
+                  <td>${p.score != null ? p.score.toFixed(2) : '—'}</td>
+                </tr>`
+              )
+              .join('')}
+          </tbody>
+        </table>
+      `;
+    }
+    el.classList.add('open');
+  }
+
+  function escapeHtml(str) {
+    return String(str).replace(/[&<>"']/g, (c) => ({
+      '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;',
+    }[c]));
+  }
+  function cssSafe(str) {
+    return String(str).replace(/[^a-zA-Z0-9_-]/g, '_');
+  }
+</script>
+</body>
+</html>
