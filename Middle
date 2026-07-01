@@ -1,0 +1,8 @@
+{
+  "name": "real-tournament",
+  "version": "1.0.0",
+  "private": true,
+  "dependencies": {
+    "hashids": "^2.3.0"
+  }
+}
