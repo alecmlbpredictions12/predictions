@@ -1,2 +1,558 @@
-index.html
-script.js
+const Hashids = require('hashids');
+const { randomUUID } = require('crypto');
+
+const API_BASE_URL = 'https://web.realsports.io';
+const HASHIDS_SALT = 'realwebapp';
+const HASHIDS_MIN_LENGTH = 16;
+const DEVICE_TYPE = 'desktop_web';
+const REAL_VERSION = '27';
+const VALID_SPORTS = ['nba', 'wnba', 'mlb', 'nhl', 'nfl', 'ncaam', 'soccer'];
+
+const hashids = new Hashids(HASHIDS_SALT, HASHIDS_MIN_LENGTH);
+// Persists for the life of a warm serverless instance, mirroring the
+// python script's one-uuid-per-run behavior closely enough for this use.
+const SESSION_DEVICE_UUID = randomUUID();
+
+function generateRequestToken() {
+  return hashids.encode(Date.now());
+}
+
+function getHeaders(authInfo) {
+  return {
+    accept: 'application/json',
+    'content-type': 'application/json',
+    origin: 'https://realsports.io',
+    referer: 'https://realsports.io/',
+    'real-auth-info': authInfo,
+    'real-device-type': DEVICE_TYPE,
+    'real-device-uuid': SESSION_DEVICE_UUID,
+    'real-request-token': generateRequestToken(),
+    'real-version': REAL_VERSION,
+  };
+}
+
+async function apiGet(path, authInfo, params = {}, timeoutMs = 15000) {
+  const url = new URL(API_BASE_URL + path);
+  Object.entries(params).forEach(([k, v]) => {
+    if (v !== undefined && v !== null) url.searchParams.set(k, String(v));
+  });
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const res = await fetch(url.toString(), { headers: getHeaders(authInfo), signal: controller.signal });
+    if (!res.ok) {
+      const err = new Error(`HTTP ${res.status} for ${path}`);
+      err.status = res.status;
+      throw err;
+    }
+    return await res.json();
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+function normalizeDay(value) {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(String(value || ''))) {
+    throw new Error(`Invalid date (expected YYYY-MM-DD): ${value}`);
+  }
+  return value;
+}
+
+async function resolveUserId(username, authInfo) {
+  const handle = username.replace(/^@/, '').trim();
+  const payload = await apiGet(`/user/${handle}`, authInfo);
+  const userId = payload && payload.user && payload.user.id;
+  if (!userId) throw new Error(`Could not resolve @${handle}`);
+  return String(userId);
+}
+
+async function fetchHomeContests(sport, authInfo) {
+  const payload = await apiGet(`/home/${sport}/next`, authInfo, { cohort: 0 });
+  return (
+    (payload &&
+      payload.latestDayContent &&
+      payload.latestDayContent.config &&
+      payload.latestDayContent.config.dailyDraftInfo &&
+      payload.latestDayContent.config.dailyDraftInfo.contests) ||
+    []
+  );
+}
+
+function contestMatches(contest, sport, contestDay) {
+  return (
+    contest &&
+    contest.id != null &&
+    String(contest.sport || '').toLowerCase() === sport &&
+    String(contest.day || '') === contestDay &&
+    contest.gameId == null
+  );
+}
+
+async function fetchContestMetadata(contestId, authInfo, contestType) {
+  try {
+    const payload = await apiGet(
+      `/games/playerratingcontest/${contestId}/entries`,
+      authInfo,
+      { contestType, isGuillotine: 'false', limit: 1 },
+      12000
+    );
+    return (payload && payload.contest) || null;
+  } catch {
+    return null;
+  }
+}
+
+async function mapWithConcurrency(items, limit, fn) {
+  const results = new Array(items.length);
+  let idx = 0;
+  async function worker() {
+    while (idx < items.length) {
+      const current = idx++;
+      results[current] = await fn(items[current], current);
+    }
+  }
+  const workerCount = Math.max(1, Math.min(limit, items.length));
+  await Promise.all(Array.from({ length: workerCount }, worker));
+  return results;
+}
+
+async function findContestId(sport, contestDay, authInfo, contestType = 'sport', scanLimit = 300) {
+  sport = sport.trim().toLowerCase();
+  contestDay = normalizeDay(contestDay);
+  const homeContests = await fetchHomeContests(sport, authInfo);
+
+  const candidateIds = [];
+  for (const contest of homeContests) {
+    if (contest && contest.id != null) candidateIds.push(Number(contest.id));
+    if (contestMatches(contest, sport, contestDay)) return Number(contest.id);
+  }
+  if (candidateIds.length === 0) {
+    throw new Error(`Could not find a current Draft contest anchor for ${sport}`);
+  }
+
+  const anchorId = candidateIds[0];
+  const forwardWindow = Math.min(50, Math.max(0, Math.floor(scanLimit / 6)));
+  const scanIds = [anchorId];
+  const backStop = Math.max(0, anchorId - scanLimit);
+  for (let i = anchorId - 1; i > backStop; i--) scanIds.push(i);
+  for (let i = anchorId + 1; i <= anchorId + forwardWindow; i++) scanIds.push(i);
+  const uniqueIds = [...new Set(scanIds)];
+
+  const metas = await mapWithConcurrency(uniqueIds, 12, (id) =>
+    fetchContestMetadata(id, authInfo, contestType)
+  );
+  const matches = metas.filter((m) => contestMatches(m, sport, contestDay));
+  if (matches.length > 0) {
+    matches.sort((a, b) => Number(b.id) - Number(a.id));
+    return Number(matches[0].id);
+  }
+  throw new Error(`Could not find a ${sport} Draft contest for ${contestDay}`);
+}
+
+async function fetchLineup(contestId, userId, authInfo, contestType) {
+  return apiGet(`/games/playerratingcontest/${contestId}/view/${userId}`, authInfo, { contestType });
+}
+
+function asFloat(value) {
+  if (value === null || value === undefined) return null;
+  const n = Number(value);
+  return Number.isNaN(n) ? null : n;
+}
+
+function summarizeLineup(username, payload) {
+  const info = (payload && payload.info) || {};
+  const contest = info.contest || {};
+  const user = info.user || {};
+  const lineup = payload.lineup || [];
+  const total = lineup.reduce((sum, p) => sum + (asFloat(p.score) || 0), 0);
+
+  const summary = {
+    inputUsername: username,
+    userName: user.userName,
+    userId: info.userId,
+    contestId: contest.id,
+    sport: contest.sport,
+    day: contest.day,
+    scoreDisplay: info.scoreDisplay,
+    rankDisplay: info.rankDisplay,
+    calculatedScore: Math.round(total * 100) / 100,
+    isFinalized: contest.isFinalized,
+  };
+
+  const players = [...lineup]
+    .sort((a, b) => (a.order || 0) - (b.order || 0))
+    .map((p) => ({
+      inputUsername: username,
+      userName: user.userName,
+      order: p.order,
+      playerId: p.playerId || p.id,
+      player: p.displayName,
+      realRank: p.realRank,
+      value: asFloat(p.value),
+      multiplier: asFloat(p.multiplier),
+      multiplierDisplay: p.multiplierDisplay,
+      score: asFloat(p.score),
+    }));
+
+  return { summary, players };
+}
+
+module.exports = async function handler(req, res) {
+  if (req.method !== 'POST') {
+    res.status(405).json({ error: 'Method not allowed' });
+    return;
+  }
+
+  const {
+    authInfo,
+    sport,
+    day,
+    usernames,
+    contestId: providedContestId,
+    contestType = 'sport',
+    scanLimit = 300,
+  } = req.body || {};
+
+  if (!authInfo || typeof authInfo !== 'string') {
+    res.status(400).json({ error: 'authInfo is required' });
+    return;
+  }
+  const normalizedSport = String(sport || '').trim().toLowerCase();
+  if (!VALID_SPORTS.includes(normalizedSport)) {
+    res.status(400).json({ error: `sport must be one of: ${VALID_SPORTS.join(', ')}` });
+    return;
+  }
+  if (!Array.isArray(usernames) || usernames.length === 0) {
+    res.status(400).json({ error: 'usernames must be a non-empty array' });
+    return;
+  }
+
+  let normalizedDay;
+  try {
+    normalizedDay = normalizeDay(day);
+  } catch (e) {
+    res.status(400).json({ error: e.message });
+    return;
+  }
+
+  const cleanUsernames = [...new Set(usernames.map((u) => String(u).trim()).filter(Boolean))];
+  if (cleanUsernames.length === 0) {
+    res.status(400).json({ error: 'At least one non-empty username is required' });
+    return;
+  }
+
+  let contestId;
+  try {
+    contestId =
+      providedContestId ||
+      (await findContestId(normalizedSport, normalizedDay, authInfo, contestType, scanLimit));
+  } catch (e) {
+    res.status(502).json({ error: `Contest lookup failed: ${e.message}` });
+    return;
+  }
+
+  const summaryRows = [];
+  const lineupRows = [];
+  const errors = [];
+
+  await mapWithConcurrency(cleanUsernames, 6, async (username) => {
+    try {
+      const userId = await resolveUserId(username, authInfo);
+      const payload = await fetchLineup(contestId, userId, authInfo, contestType);
+      const { summary, players } = summarizeLineup(username, payload);
+      summaryRows.push(summary);
+      lineupRows.push(...players);
+    } catch (e) {
+      errors.push({ inputUsername: username, error: e.message });
+    }
+  });
+
+  summaryRows.sort((a, b) => (b.calculatedScore || 0) - (a.calculatedScore || 0));
+
+  res.status(200).json({
+    contestId,
+    sport: normalizedSport,
+    day: normalizedDay,
+    summary: summaryRows,
+    lineups: lineupRows,
+    errors,
+  });
+};
+
+
+  ng { text-align: center; padding: 40px 0; }
+  .spinner {
+    width: 34px; height: 34px;
+    border: 3px solid var(--line);
+    border-top-color: var(--amber);
+    border-radius: 50%;
+    margin: 0 auto 16px;
+    animation: spin 0.8s linear infinite;
+  }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  .loading .msg { font-family: var(--mono); font-size: 13px; color: var(--muted); }
+
+  /* Results / scoreboard */
+  .board-meta {
+    display: flex;
+    justify-content: space-between;
+    align-items: baseline;
+    margin-bottom: 18px;
+    font-family: var(--mono);
+    font-size: 12px;
+    color: var(--muted);
+  }
+  .board-meta span.hl { color: var(--amber); }
+
+  .standing {
+    display: grid;
+    grid-template-columns: 44px 1fr auto;
+    align-items: center;
+    gap: 14px;
+    padding: 14px 12px;
+    border-bottom: 1px solid var(--line);
+    cursor: pointer;
+    opacity: 0;
+    transform: translateY(6px);
+    animation: reveal 0.35s ease forwards;
+  }
+  .standing:last-child { border-bottom: none; }
+  .standing:hover { background: rgba(255,255,255,0.02); }
+  @keyframes reveal { to { opacity: 1; transform: translateY(0); } }
+
+  .rank {
+    font-family: var(--mono);
+    font-weight: 600;
+    font-size: 17px;
+    text-align: center;
+    color: var(--muted);
+  }
+  .standing[data-rank="1"] .rank { color: #f4c94a; }
+  .standing[data-rank="2"] .rank { color: #c9d2dc; }
+  .standing[data-rank="3"] .rank { color: #d38a54; }
+
+  .who .uname { font-weight: 600; font-size: 15px; }
+  .who .status { font-family: var(--mono); font-size: 11px; color: var(--muted); margin-top: 2px; }
+
+  .scorebox { text-align: right; }
+  .scorebox .score {
+    font-family: var(--mono);
+    font-weight: 600;
+    font-size: 19px;
+    color: var(--green);
+  }
+  .scorebox .rankd { font-family: var(--mono); font-size: 11px; color: var(--muted); margin-top: 2px; }
+
+  .lineup-detail {
+    display: none;
+    grid-column: 1 / -1;
+    margin-top: 10px;
+    padding-top: 10px;
+    border-top: 1px dashed var(--line);
+  }
+  .lineup-detail.open { display: block; }
+  .lineup-detail table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  .lineup-detail th, .lineup-detail td {
+    text-align: left;
+    padding: 6px 8px;
+    color: var(--muted);
+  }
+  .lineup-detail th {
+    font-family: var(--mono);
+    font-size: 10px;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+  }
+  .lineup-detail td:last-child, .lineup-detail th:last-child { text-align: right; }
+  .lineup-detail tr td { color: var(--text); border-top: 1px solid var(--line); }
+
+  .errors {
+    margin-top: 18px;
+    padding: 14px 16px;
+    border: 1px solid rgba(235,87,87,0.35);
+    background: rgba(235,87,87,0.06);
+    border-radius: 8px;
+  }
+  .errors h3 {
+    font-family: var(--mono);
+    font-size: 12px;
+    color: var(--red);
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    margin: 0 0 8px;
+  }
+  .errors li { font-size: 13px; color: var(--muted); margin-bottom: 4px; }
+
+  .banner {
+    padding: 12px 14px;
+    border-radius: 7px;
+    border: 1px solid rgba(235,87,87,0.35);
+    background: rgba(235,87,87,0.08);
+    color: #ffb4b4;
+    font-size: 13px;
+    margin-bottom: 16px;
+  }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <header class="top">
+    <div class="eyebrow">Real Sports · Lineup Tournament</div>
+    <h1>Set the field</h1>
+    <div class="sub">Pick how many entries are in, drop in usernames, and pull live scores for one contest.</div>
+  </header>
+
+  <!-- STEP 1: field size -->
+  <div id="screen-1" class="screen active">
+    <div class="card">
+      <label>Number of entries</label>
+      <div class="stepper">
+        <button type="button" id="decBtn">&minus;</button>
+        <div class="count" id="countDisplay">4</div>
+        <button type="button" id="incBtn">&plus;</button>
+      </div>
+      <button class="btn" id="toStep2">Build Tournament</button>
+    </div>
+  </div>
+
+  <!-- STEP 2: details -->
+  <div id="screen-2" class="screen">
+    <div class="card">
+      <div class="row-2">
+        <div class="field">
+          <label>Sport</label>
+          <select id="sportSelect">
+            <option value="nba">NBA</option>
+            <option value="wnba">WNBA</option>
+            <option value="mlb">MLB</option>
+            <option value="nhl">NHL</option>
+            <option value="nfl">NFL</option>
+            <option value="ncaam">NCAAM</option>
+            <option value="soccer" selected>Soccer</option>
+          </select>
+        </div>
+        <div class="field">
+          <label>Contest date</label>
+          <input type="date" id="dayInput" />
+        </div>
+      </div>
+
+      <label>Entries</label>
+      <div id="usernameFields"></div>
+
+      <div class="field">
+        <label>real-auth-info</label>
+        <input type="password" id="authInput" placeholder="Paste your real-auth-info" autocomplete="off" />
+        <div class="hint">Sent directly to the serverless function for this request only — never stored or logged.</div>
+      </div>
+
+      <div class="btn-row">
+        <button class="btn ghost" id="backTo1">Back</button>
+        <button class="btn" id="runTournament">Run Tournament</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- STEP 3: loading -->
+  <div id="screen-loading" class="screen">
+    <div class="card loading">
+      <div class="spinner"></div>
+      <div class="msg" id="loadingMsg">Finding contest…</div>
+    </div>
+  </div>
+
+  <!-- STEP 4: results -->
+  <div id="screen-results" class="screen">
+    <div id="errorBanner"></div>
+    <div class="board-meta">
+      <span>Contest <span class="hl" id="metaContestId">—</span></span>
+      <span><span class="hl" id="metaSport">—</span> · <span id="metaDay">—</span></span>
+    </div>
+    <div class="card" style="padding: 8px 12px;">
+      <div id="standingsList"></div>
+    </div>
+    <div id="errorsBlock"></div>
+    <button class="btn ghost" id="backToStart" style="margin-top:18px;">Start a new tournament</button>
+  </div>
+
+</div>
+
+<script>
+  const state = { count: 4, lineups: {} };
+
+  const countDisplay = document.getElementById('countDisplay');
+  const decBtn = document.getElementById('decBtn');
+  const incBtn = document.getElementById('incBtn');
+
+  decBtn.addEventListener('click', () => {
+    state.count = Math.max(2, state.count - 1);
+    countDisplay.textContent = state.count;
+  });
+  incBtn.addEventListener('click', () => {
+    state.count = Math.min(50, state.count + 1);
+    countDisplay.textContent = state.count;
+  });
+
+  function showScreen(id) {
+    document.querySelectorAll('.screen').forEach((el) => el.classList.remove('active'));
+    document.getElementById(id).classList.add('active');
+  }
+
+  document.getElementById('toStep2').addEventListener('click', () => {
+    buildUsernameFields(state.count);
+    // default date = today
+    const dayInput = document.getElementById('dayInput');
+    if (!dayInput.value) dayInput.value = new Date().toISOString().slice(0, 10);
+    showScreen('screen-2');
+  });
+
+  document.getElementById('backTo1').addEventListener('click', () => showScreen('screen-1'));
+  document.getElementById('backToStart').addEventListener('click', () => showScreen('screen-1'));
+
+  function buildUsernameFields(n) {
+    const container = document.getElementById('usernameFields');
+    container.innerHTML = '';
+    for (let i = 1; i <= n; i++) {
+      const row = document.createElement('div');
+      row.className = 'uname-row';
+      row.innerHTML = `
+        <span class="slot">${i}</span>
+        <input type="text" placeholder="username" data-idx="${i}" />
+      `;
+      container.appendChild(row);
+    }
+  }
+
+  document.getElementById('runTournament').addEventListener('click', runTournament);
+
+  async function runTournament() {
+    const sport = document.getElementById('sportSelect').value;
+    const day = document.getElementById('dayInput').value;
+    const authInfo = document.getElementById('authInput').value.trim();
+    const usernames = Array.from(document.querySelectorAll('#usernameFields input'))
+      .map((el) => el.value.trim())
+      .filter(Boolean);
+
+    if (!authInfo) return alert('real-auth-info is required.');
+    if (!day) return alert('Pick a contest date.');
+    if (usernames.length === 0) return alert('Enter at least one username.');
+
+    showScreen('screen-loading');
+    document.getElementById('loadingMsg').textContent = 'Finding contest and pulling lineups…';
+
+    try {
+      const res = await fetch('/api/tournament', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ authInfo, sport, day, usernames }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || 'Request failed');
+      renderResults(data);
+      showScreen('screen-results');
+    } catch (e) {
+      showScreen('screen-2');
+      alert(e.message);
+    }
+  }
